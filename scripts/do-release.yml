@@ -1,0 +1,80 @@
+name: Release on tag
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version to publish
+        required: true
+      gitRef:
+        description: The git ref to build against
+        required: false
+
+jobs:
+  getversion:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.pkgVersion }}
+      gitRef: ${{ steps.get_version.outputs.gitRef }}
+    steps:
+      - name: Get version
+        id: get_version
+        run: |
+          version=""
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]
+          then
+            version="${{ github.event.inputs.version }}"
+          else
+            version="$GITHUB_REF_NAME"
+          fi
+          echo "pkgVersion=$version" >> $GITHUB_OUTPUT
+          echo "Version: $version"
+
+          gitRef=""
+          if [ "${{ github.event.inputs.gitRef }}" != "" ]
+          then
+            gitRef="${{ github.event.inputs.gitRef }}"
+          else
+            gitRef="$version"
+          fi
+          echo "gitRef=$gitRef" >> $GITHUB_OUTPUT
+          echo "GIT Ref: $gitRef"
+  do-build:
+    needs: getversion
+    uses: ./.github/workflows/build-and-test.yml
+    with:
+      gitRef: ${{ needs.getversion.outputs.gitRef }}
+      doArtifact: true
+  publish:
+    runs-on: windows-latest
+    needs: [do-build, getversion]
+    environment: build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: RWP-dist
+          path: dist
+      - run: |
+          Get-ChildItem -Recurse
+      - name: Get installer checksum
+        id: get_installer_checksum
+        run: |
+          $rwpChecksum=$(Get-FileHash -Path .\dist\RestoreWindowPos_install.exe -Algorithm sha256).Hash
+          echo "SHA256 checksum: $rwpChecksum"
+          echo "pkgChecksum=$rwpChecksum" >> $env:GITHUB_OUTPUT
+      - name: Draft GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: "RestoreWindowPos_install.exe SHA256 Checksum: `${{steps.get_installer_checksum.outputs.pkgChecksum}}`"
+          draft: true
+          files: "dist/RestoreWindowPos_install.exe"
+          name: "RestoreWindowPos v${{ needs.getversion.outputs.version }}"
+          tag_name: ${{needs.getversion.outputs.version}}
+      - name: Push to chocolatey
+        env:
+          PKGVERSION: ${{ needs.getversion.outputs.version }}
+        run: |
+          choco push "dist/restorewindowpos.$env:PKGVERSION.nupkg" --source "https://push.chocolatey.org/" -k "${{secrets.CHOCO_API_KEY}}"
